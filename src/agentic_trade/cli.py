@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 import os
@@ -13,32 +14,81 @@ import anthropic
 
 from . import market_data
 from .agent import TradingAgent
-from .broker import PaperBroker, Portfolio
+from .broker import PaperBroker, Portfolio, SizedOrder
 from .config import Settings
+from .live_broker import LiveBroker, mask
+from .robinhood import RobinhoodCryptoClient
 
 
-def _history_path(settings: Settings):
-    return settings.state_path.with_name("price_history.json")
+def _history_path(state_path):
+    return state_path.with_name(state_path.stem + "_price_history.json")
+
+
+def _robinhood_client() -> RobinhoodCryptoClient:
+    key, secret = os.environ.get("ROBINHOOD_API_KEY"), os.environ.get("ROBINHOOD_PRIVATE_KEY_BASE64")
+    if not (key and secret):
+        sys.exit("Live mode needs ROBINHOOD_API_KEY and ROBINHOOD_PRIVATE_KEY_BASE64.")
+    return RobinhoodCryptoClient(key, secret)
+
+
+def _approver(auto_approve: bool):
+    def approve(order: SizedOrder, reason: str) -> bool:
+        summary = (f"LIVE ORDER: {order.side.upper()} {order.quantity} {order.symbol} "
+                   f"(~${order.quantity * order.price:,.2f} at {order.price:,.2f})\n  reason: {reason}")
+        print(summary, file=sys.stderr)
+        if auto_approve:
+            print("  auto-approved (--yes)", file=sys.stderr)
+            return True
+        if not sys.stdin.isatty():
+            print("  declined: no terminal to ask for approval (use --yes to auto-approve)", file=sys.stderr)
+            return False
+        return input("  Place this order? [y/N] ").strip().lower() in ("y", "yes")
+    return approve
+
+
+def _live_broker(settings: Settings, auto_approve: bool) -> LiveBroker:
+    client = _robinhood_client()
+    risk = dataclasses.replace(settings.risk, max_order_notional=min(settings.risk.max_order_notional,
+                                                                      settings.live_max_order_notional))
+    portfolio = Portfolio.load(settings.live_state_path, starting_cash=0.0)
+    broker = LiveBroker(client, portfolio, risk, settings.symbols, _approver(auto_approve),
+                        settings.expected_account)
+    broker.sync()
+    return broker
 
 
 def cmd_run(args, settings: Settings) -> int:
-    feed = market_data.from_env(dict(os.environ), seed=args.seed)
-    print(f"Market data: {type(feed).__name__}", file=sys.stderr)
     client = anthropic.Anthropic()
+
+    if args.live:
+        broker = _live_broker(settings, args.yes)
+        feed = broker.client
+        state_path = settings.live_state_path
+        print(f"LIVE TRADING on Robinhood crypto account {mask(broker.account['account_number'])} | "
+              f"buying power ${broker.portfolio.cash:,.2f} | max ${broker.risk.max_order_notional:,.2f}/order | "
+              f"{'auto-approve' if args.yes else 'manual approval'}", file=sys.stderr)
+    else:
+        feed = market_data.from_env(dict(os.environ), seed=args.seed)
+        state_path = settings.state_path
+        print(f"Paper trading | market data: {type(feed).__name__}", file=sys.stderr)
 
     iteration = 0
     while True:
         iteration += 1
-        portfolio = Portfolio.load(settings.state_path, settings.starting_cash)
-        history = market_data.PriceHistory(_history_path(settings))
-        broker = PaperBroker(portfolio, settings.risk, settings.symbols, settings.fee_rate)
+        history = market_data.PriceHistory(_history_path(state_path))
+        if args.live:
+            if iteration > 1:
+                broker.sync()
+        else:
+            portfolio = Portfolio.load(state_path, settings.starting_cash)
+            broker = PaperBroker(portfolio, settings.risk, settings.symbols, settings.fee_rate)
         quotes = feed.quotes(list(settings.symbols))
 
-        result = TradingAgent(client, settings, broker, history).run(quotes)
-        portfolio.save(settings.state_path)
+        result = TradingAgent(client, settings, broker, history, live=args.live).run(quotes)
+        broker.portfolio.save(state_path)
         history.save()
 
-        snap = portfolio.snapshot(quotes)
+        snap = broker.portfolio.snapshot(quotes)
         print(f"\n=== Run {iteration} ({len(result.fills)} fills, stop: {result.stop_reason}) ===")
         print(result.summary)
         print(f"Equity ${snap['equity']:,.2f} | cash ${snap['cash']:,.2f}")
@@ -49,22 +99,28 @@ def cmd_run(args, settings: Settings) -> int:
 
 
 def cmd_status(args, settings: Settings) -> int:
-    portfolio = Portfolio.load(settings.state_path, settings.starting_cash)
-    feed = market_data.from_env(dict(os.environ), seed=args.seed)
-    quotes = feed.quotes(list(settings.symbols))
-    print(json.dumps(portfolio.snapshot(quotes), indent=2))
+    if args.live:
+        broker = _live_broker(settings, auto_approve=False)
+        quotes = broker.client.quotes(list(settings.symbols))
+        snap = broker.portfolio.snapshot(quotes)
+        snap["account"] = mask(broker.account["account_number"])
+    else:
+        portfolio = Portfolio.load(settings.state_path, settings.starting_cash)
+        feed = market_data.from_env(dict(os.environ), seed=args.seed)
+        snap = portfolio.snapshot(feed.quotes(list(settings.symbols)))
+    print(json.dumps(snap, indent=2))
     return 0
 
 
 def cmd_reset(args, settings: Settings) -> int:
-    for path in (settings.state_path, _history_path(settings)):
+    for path in (settings.state_path, _history_path(settings.state_path)):
         path.unlink(missing_ok=True)
-    print(f"Reset paper portfolio to ${settings.starting_cash:,.2f} cash.")
+    print(f"Reset paper portfolio to ${settings.starting_cash:,.2f} cash. Live trade logs are untouched.")
     return 0
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="agentic-trade", description="Claude paper-trading agent for crypto.")
+    parser = argparse.ArgumentParser(prog="agentic-trade", description="Claude trading agent for crypto.")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--seed", type=int, default=None, help="Seed for simulated prices.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -72,11 +128,17 @@ def main(argv: list[str] | None = None) -> int:
     run = sub.add_parser("run", help="Run the agent.")
     run.add_argument("--iterations", type=int, default=1, help="Number of runs; 0 loops forever.")
     run.add_argument("--interval", type=float, default=300, help="Seconds between runs.")
+    run.add_argument("--live", action="store_true", help="Trade real money on Robinhood (default: paper).")
+    run.add_argument("--yes", action="store_true", help="With --live, place orders without asking for approval.")
     run.set_defaults(func=cmd_run)
-    sub.add_parser("status", help="Show the paper portfolio.").set_defaults(func=cmd_status)
-    sub.add_parser("reset", help="Delete saved portfolio and price history.").set_defaults(func=cmd_reset)
+    status = sub.add_parser("status", help="Show the portfolio.")
+    status.add_argument("--live", action="store_true", help="Show the live Robinhood account.")
+    status.set_defaults(func=cmd_status)
+    sub.add_parser("reset", help="Delete the saved paper portfolio and price history.").set_defaults(func=cmd_reset)
 
     args = parser.parse_args(argv)
+    if getattr(args, "yes", False) and not args.live:
+        parser.error("--yes only applies with --live")
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(asctime)s %(levelname)s %(message)s")
     return args.func(args, Settings.from_env())

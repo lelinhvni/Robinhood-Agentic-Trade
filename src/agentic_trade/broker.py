@@ -25,6 +25,9 @@ class Fill:
     notional: float
     fee: float
     reason: str = ""
+    order_id: str = ""
+    """Robinhood order id; empty for paper fills."""
+    status: str = "filled"
 
 
 @dataclass
@@ -66,6 +69,61 @@ class Portfolio:
         tmp.replace(path)
 
 
+@dataclass(frozen=True)
+class SizedOrder:
+    symbol: str
+    side: str
+    quantity: float
+    price: float
+    fee: float
+
+
+def check_order(portfolio: Portfolio, risk: RiskLimits, allowed_symbols: tuple[str, ...], orders_this_run: int,
+                symbol: str, side: str, notional_usd: float, quotes: dict[str, Quote],
+                fee_rate: float = 0.0) -> SizedOrder:
+    """Apply every risk limit and size the order at the quote. Raises OrderRejected."""
+    symbol = symbol.upper()
+    side = side.lower()
+    p, r = portfolio, risk
+
+    if symbol not in allowed_symbols:
+        raise OrderRejected(f"{symbol} is not in the allowed symbol list {list(allowed_symbols)}")
+    if side not in ("buy", "sell"):
+        raise OrderRejected("side must be 'buy' or 'sell'")
+    if not notional_usd or notional_usd <= 0:
+        raise OrderRejected("notional_usd must be positive")
+    if orders_this_run >= r.max_orders_per_run:
+        raise OrderRejected(f"order limit reached ({r.max_orders_per_run} per run)")
+    if notional_usd > r.max_order_notional:
+        raise OrderRejected(f"order ${notional_usd:,.2f} exceeds max order size ${r.max_order_notional:,.2f}")
+    if symbol not in quotes:
+        raise OrderRejected(f"no quote available for {symbol}")
+
+    quote = quotes[symbol]
+    equity = p.equity(quotes)
+    fee = notional_usd * fee_rate
+
+    if side == "buy":
+        qty = notional_usd / quote.ask
+        cost = notional_usd + fee
+        if cost > p.cash:
+            raise OrderRejected(f"insufficient cash: need ${cost:,.2f}, have ${p.cash:,.2f}")
+        if p.cash - cost < equity * r.min_cash_reserve_pct:
+            raise OrderRejected(f"order would breach the {r.min_cash_reserve_pct:.0%} cash reserve")
+        position_after = (p.holdings.get(symbol, 0.0) + qty) * quote.bid
+        if position_after > equity * r.max_position_pct:
+            raise OrderRejected(
+                f"{symbol} would be {position_after / equity:.0%} of equity, above the {r.max_position_pct:.0%} cap")
+        return SizedOrder(symbol, side, qty, quote.ask, fee)
+
+    held = p.holdings.get(symbol, 0.0)
+    qty = notional_usd / quote.bid
+    # Allow a small overshoot so "sell my whole position" works when the model rounds up.
+    if qty > held * 1.005:
+        raise OrderRejected(f"cannot sell {qty:.8f} {symbol}; only {held:.8f} held (no shorting)")
+    return SizedOrder(symbol, side, min(qty, held), quote.bid, fee)
+
+
 class PaperBroker:
     """Validates orders against risk limits and fills them against the portfolio.
 
@@ -81,61 +139,28 @@ class PaperBroker:
 
     def place_market_order(self, symbol: str, side: str, notional_usd: float, quotes: dict[str, Quote],
                            reason: str = "") -> Fill:
-        symbol = symbol.upper()
-        side = side.lower()
-        p, r = self.portfolio, self.risk
-
-        if symbol not in self.allowed_symbols:
-            raise OrderRejected(f"{symbol} is not in the allowed symbol list {list(self.allowed_symbols)}")
-        if side not in ("buy", "sell"):
-            raise OrderRejected("side must be 'buy' or 'sell'")
-        if not notional_usd or notional_usd <= 0:
-            raise OrderRejected("notional_usd must be positive")
-        if self.orders_this_run >= r.max_orders_per_run:
-            raise OrderRejected(f"order limit reached ({r.max_orders_per_run} per run)")
-        if notional_usd > r.max_order_notional:
-            raise OrderRejected(f"order ${notional_usd:,.2f} exceeds max order size ${r.max_order_notional:,.2f}")
-        if symbol not in quotes:
-            raise OrderRejected(f"no quote available for {symbol}")
-
-        quote = quotes[symbol]
-        equity = p.equity(quotes)
-        fee = notional_usd * self.fee_rate
-
-        if side == "buy":
-            price = quote.ask
-            qty = notional_usd / price
-            cost = notional_usd + fee
-            if cost > p.cash:
-                raise OrderRejected(f"insufficient cash: need ${cost:,.2f}, have ${p.cash:,.2f}")
-            if p.cash - cost < equity * r.min_cash_reserve_pct:
-                raise OrderRejected(f"order would breach the {r.min_cash_reserve_pct:.0%} cash reserve")
-            position_after = (p.holdings.get(symbol, 0.0) + qty) * quote.bid
-            if position_after > equity * r.max_position_pct:
-                raise OrderRejected(
-                    f"{symbol} would be {position_after / equity:.0%} of equity, above the {r.max_position_pct:.0%} cap")
-            p.cash -= cost
-            p.holdings[symbol] = p.holdings.get(symbol, 0.0) + qty
+        o = check_order(self.portfolio, self.risk, self.allowed_symbols, self.orders_this_run,
+                        symbol, side, notional_usd, quotes, self.fee_rate)
+        p = self.portfolio
+        if o.side == "buy":
+            p.cash -= o.quantity * o.price + o.fee
+            p.holdings[o.symbol] = p.holdings.get(o.symbol, 0.0) + o.quantity
         else:
-            price = quote.bid
-            held = p.holdings.get(symbol, 0.0)
-            qty = notional_usd / price
-            # Allow a small overshoot so "sell my whole position" works when the model rounds up.
-            if qty > held * 1.005:
-                raise OrderRejected(f"cannot sell {qty:.8f} {symbol}; only {held:.8f} held (no shorting)")
-            qty = min(qty, held)
-            p.cash += qty * price - fee
-            remaining = held - qty
-            if remaining * price < 0.01:
-                p.holdings.pop(symbol, None)
+            p.cash += o.quantity * o.price - o.fee
+            remaining = p.holdings.get(o.symbol, 0.0) - o.quantity
+            if remaining * o.price < 0.01:
+                p.holdings.pop(o.symbol, None)
             else:
-                p.holdings[symbol] = remaining
+                p.holdings[o.symbol] = remaining
 
         fill = Fill(
-            timestamp=datetime.now(timezone.utc).isoformat(timespec="seconds"),
-            symbol=symbol, side=side, quantity=qty, price=price,
-            notional=round(qty * price, 2), fee=round(fee, 2), reason=reason,
+            timestamp=now_iso(), symbol=o.symbol, side=o.side, quantity=o.quantity, price=o.price,
+            notional=round(o.quantity * o.price, 2), fee=round(o.fee, 2), reason=reason,
         )
         p.fills.append(fill)
         self.orders_this_run += 1
         return fill
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")

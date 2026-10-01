@@ -1,25 +1,18 @@
 """Market data sources.
 
-`RobinhoodCryptoMarketData` reads live best bid/ask quotes from the official
-Robinhood Crypto Trading API. It only calls read-only market data endpoints;
-this project never sends orders to Robinhood.
+Live quotes come from `robinhood.RobinhoodCryptoClient`, which also satisfies
+the `MarketData` protocol.
 
 `SimulatedMarketData` is a seeded random walk for offline runs and tests.
 """
 
 from __future__ import annotations
 
-import base64
 import json
 import random
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
-from urllib.parse import urlencode
-
-import requests
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 
 @dataclass(frozen=True)
@@ -38,50 +31,6 @@ class Quote:
 
 class MarketData(Protocol):
     def quotes(self, symbols: list[str]) -> dict[str, Quote]: ...
-
-
-class RobinhoodCryptoMarketData:
-    """Signed client for Robinhood's Crypto Trading API (market data only)."""
-
-    BASE_URL = "https://trading.robinhood.com"
-
-    def __init__(self, api_key: str, private_key_base64: str, session: requests.Session | None = None):
-        seed = base64.b64decode(private_key_base64)
-        # Robinhood's key generator prints the 32-byte seed; accept a 64-byte seed||public key too.
-        self._key = Ed25519PrivateKey.from_private_bytes(seed[:32])
-        self._api_key = api_key
-        self._session = session or requests.Session()
-
-    def _headers(self, method: str, path: str, body: str = "") -> dict[str, str]:
-        timestamp = str(int(time.time()))
-        message = f"{self._api_key}{timestamp}{path}{method}{body}"
-        signature = base64.b64encode(self._key.sign(message.encode())).decode()
-        return {
-            "x-api-key": self._api_key,
-            "x-signature": signature,
-            "x-timestamp": timestamp,
-            "Content-Type": "application/json; charset=utf-8",
-        }
-
-    def _get(self, path: str) -> dict:
-        resp = self._session.get(self.BASE_URL + path, headers=self._headers("GET", path), timeout=10)
-        resp.raise_for_status()
-        return resp.json()
-
-    def quotes(self, symbols: list[str]) -> dict[str, Quote]:
-        query = urlencode([("symbol", s) for s in symbols])
-        data = self._get(f"/api/v1/crypto/marketdata/best_bid_ask/?{query}")
-        out: dict[str, Quote] = {}
-        for row in data.get("results", []):
-            out[row["symbol"]] = Quote(
-                symbol=row["symbol"],
-                bid=float(row["bid_inclusive_of_sell_spread"]),
-                ask=float(row["ask_inclusive_of_buy_spread"]),
-            )
-        missing = set(symbols) - out.keys()
-        if missing:
-            raise LookupError(f"No quote returned for: {', '.join(sorted(missing))}")
-        return out
 
 
 class SimulatedMarketData:
@@ -132,9 +81,6 @@ class PriceHistory:
 def from_env(env: dict[str, str], seed: int | None = None) -> MarketData:
     key, secret = env.get("ROBINHOOD_API_KEY"), env.get("ROBINHOOD_PRIVATE_KEY_BASE64")
     if key and secret:
-        return RobinhoodCryptoMarketData(key, secret)
+        from .robinhood import RobinhoodCryptoClient
+        return RobinhoodCryptoClient(key, secret)
     return SimulatedMarketData(seed=seed)
-
-
-def dumps_quotes(quotes: dict[str, Quote]) -> str:
-    return json.dumps([q.to_dict() for q in quotes.values()])

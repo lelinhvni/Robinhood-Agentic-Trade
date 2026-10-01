@@ -1,9 +1,9 @@
 """The Claude decision loop.
 
-Each run: fetch one set of quotes, give Claude tools to inspect the paper
-portfolio and price history and to place orders, and loop until it finishes.
-Every order goes through `PaperBroker`, which enforces the risk limits; a
-rejected order comes back to Claude as a tool error it can react to.
+Each run: fetch one set of quotes, give Claude tools to inspect the portfolio
+and price history and to place orders, and loop until it finishes. Every order
+goes through the broker (`PaperBroker` or `LiveBroker`), which enforces the risk
+limits; a rejected order comes back to Claude as a tool error it can react to.
 """
 
 from __future__ import annotations
@@ -18,13 +18,20 @@ import anthropic
 
 from .broker import Fill, OrderRejected, PaperBroker
 from .config import Settings
+from .live_broker import LiveBroker
 from .market_data import PriceHistory, Quote
 
 log = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """\
+PAPER_INTRO = """\
 You manage a paper-trading crypto portfolio. No real money is at stake, but trade as if it were: \
-the goal is steady risk-adjusted growth, not activity.
+the goal is steady risk-adjusted growth, not activity."""
+
+LIVE_INTRO = """\
+You manage a real crypto account on Robinhood. Orders you place spend real money. \
+The goal is steady risk-adjusted growth, not activity. A human may decline any order you propose."""
+
+SYSTEM_PROMPT_BODY = """
 
 Each run you get fresh quotes. Use the tools to review the portfolio and recent price history, \
 then decide whether to buy, sell, or hold. Holding is often the right call; only trade when you \
@@ -63,7 +70,7 @@ TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "place_order",
-        "description": "Place a paper market order sized in USD. Returns the fill, or an error explaining "
+        "description": "Place a market order sized in USD. Returns the fill, or an error explaining "
                        "which risk limit rejected it.",
         "input_schema": {
             "type": "object",
@@ -89,8 +96,10 @@ class RunResult:
 
 
 class TradingAgent:
-    def __init__(self, client: anthropic.Anthropic, settings: Settings, broker: PaperBroker,
-                 history: PriceHistory):
+    def __init__(self, client: anthropic.Anthropic, settings: Settings, broker: PaperBroker | LiveBroker,
+                 history: PriceHistory, live: bool = False):
+        self.live = live
+        self.system_prompt = (LIVE_INTRO if live else PAPER_INTRO) + SYSTEM_PROMPT_BODY
         self.client = client
         self.settings = settings
         self.broker = broker
@@ -135,7 +144,7 @@ class TradingAgent:
             response = self.client.beta.messages.create(
                 model=self.settings.model,
                 max_tokens=16000,
-                system=SYSTEM_PROMPT,
+                system=self.system_prompt,
                 tools=tools,
                 messages=messages,
                 thinking={"type": "adaptive"},

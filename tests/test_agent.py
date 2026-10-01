@@ -78,3 +78,13 @@ def test_agent_turn_limit(tmp_path):
     result = agent.run(QUOTES)
     assert result.stop_reason == "turn_limit"
     assert len(client.calls) == agent.settings.max_agent_turns
+
+
+def test_live_mode_changes_system_prompt(tmp_path):
+    client = FakeClient([NS(stop_reason="end_turn", stop_details=None, content=[text("Holding.")])])
+    agent, _ = make_agent(client, tmp_path)
+    paper_prompt = agent.system_prompt
+    agent = TradingAgent(client, agent.settings, agent.broker, agent.history, live=True)
+    agent.run(QUOTES)
+    assert "paper-trading" in paper_prompt
+    assert "real money" in client.calls[0]["system"]

@@ -37,13 +37,26 @@ class Settings:
     max_agent_turns: int = 12
     risk: RiskLimits = field(default_factory=RiskLimits)
 
+    live_max_order_notional: float = 5.0
+    """Per-order cap in live mode. It replaces risk.max_order_notional when trading real money."""
+
+    expected_account: str | None = None
+    """Robinhood crypto account number the API key must belong to; live mode refuses to trade otherwise."""
+
+    @property
+    def live_state_path(self) -> Path:
+        return self.state_path.with_name("live_" + self.state_path.name)
+
     @classmethod
     def from_env(cls) -> "Settings":
         symbols = os.environ.get("AGENTIC_TRADE_SYMBOLS")
         state = os.environ.get("AGENTIC_TRADE_STATE")
-        kwargs: dict = {}
+        max_live = os.environ.get("AGENTIC_TRADE_LIVE_MAX_ORDER_USD")
+        kwargs: dict = {"expected_account": os.environ.get("ROBINHOOD_EXPECTED_ACCOUNT") or None}
         if symbols:
             kwargs["symbols"] = tuple(s.strip().upper() for s in symbols.split(",") if s.strip())
         if state:
             kwargs["state_path"] = Path(state)
+        if max_live:
+            kwargs["live_max_order_notional"] = float(max_live)
         return cls(**kwargs)
