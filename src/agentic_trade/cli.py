@@ -113,6 +113,34 @@ def cmd_status(args, settings: Settings) -> int:
     return 0
 
 
+def cmd_keygen(args, settings: Settings) -> int:
+    """Create an Ed25519 key pair for the Robinhood Crypto Trading API."""
+    import base64
+    from pathlib import Path
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, NoEncryption, PrivateFormat, PublicFormat
+
+    out = Path(args.out).expanduser()
+    if out.exists() and not args.force:
+        sys.exit(f"{out} already exists. Use --force to overwrite it (the old key stops working on Robinhood).")
+
+    key = Ed25519PrivateKey.generate()
+    private_b64 = base64.b64encode(key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())).decode()
+    public_b64 = base64.b64encode(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode()
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.touch(mode=0o600, exist_ok=True)
+    out.chmod(0o600)
+    out.write_text(f"ROBINHOOD_PRIVATE_KEY_BASE64={private_b64}\n")
+
+    print("Public key (paste this into Robinhood when creating the API key):\n")
+    print(f"  {public_b64}\n")
+    print(f"Private key saved to {out} (readable only by you). Never share it or commit it.")
+    print(f"Load it with:  set -a; source {out}; set +a")
+    return 0
+
+
 def cmd_reset(args, settings: Settings) -> int:
     for path in (settings.state_path, _history_path(settings.state_path)):
         path.unlink(missing_ok=True)
@@ -136,6 +164,11 @@ def main(argv: list[str] | None = None) -> int:
     status.add_argument("--live", action="store_true", help="Show the live Robinhood account.")
     status.set_defaults(func=cmd_status)
     sub.add_parser("reset", help="Delete the saved paper portfolio and price history.").set_defaults(func=cmd_reset)
+    keygen = sub.add_parser("keygen", help="Create a key pair for the Robinhood Crypto Trading API.")
+    keygen.add_argument("--out", default="~/.config/agentic-trade/robinhood.env",
+                        help="Where to save the private key (default: %(default)s).")
+    keygen.add_argument("--force", action="store_true", help="Overwrite an existing key file.")
+    keygen.set_defaults(func=cmd_keygen)
 
     args = parser.parse_args(argv)
     if getattr(args, "confirm", False) and not args.live:

@@ -44,7 +44,7 @@ cp .env.example .env   # then fill in, and export the variables
 | Variable | Purpose |
 |---|---|
 | `ANTHROPIC_API_KEY` | Claude API access. Not needed if you've already run `ant auth login`. |
-| `ROBINHOOD_API_KEY`, `ROBINHOOD_PRIVATE_KEY_BASE64` | Robinhood Crypto API credentials, created at robinhood.com under crypto API settings. Optional in paper mode, where they only supply live quotes. Required for `--live`. |
+| `ROBINHOOD_API_KEY`, `ROBINHOOD_PRIVATE_KEY_BASE64` | Robinhood Crypto API credentials. Run `agentic-trade keygen` to make a key pair, paste the printed public key into Robinhood's crypto API settings, and use the API key Robinhood gives back. Optional in paper mode, where they only supply live quotes. Required for `--live`. |
 | `ROBINHOOD_EXPECTED_ACCOUNT` | Live mode refuses to trade if the API key belongs to a different crypto account. Recommended. |
 | `AGENTIC_TRADE_LIVE_MAX_ORDER_USD` | Per-order cap in live mode. Default `5`. |
 | `AGENTIC_TRADE_LIVE_AUTO_APPROVE` | Default `1`: live orders are placed without asking. Set `0` to require y/N approval, the same as `--confirm`. |
@@ -63,6 +63,7 @@ agentic-trade status
 agentic-trade reset
 
 # Live: real money
+agentic-trade keygen                                # one-time: create the key pair for Robinhood
 agentic-trade status --live                         # account, buying power, holdings
 agentic-trade -v run --live                         # places orders automatically, within the limits
 agentic-trade -v run --live --confirm               # asks y/N before each order

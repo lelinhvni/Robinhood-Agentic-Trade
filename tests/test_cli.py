@@ -24,6 +24,28 @@ def test_live_without_credentials_exits(monkeypatch):
         main(["status", "--live"])
 
 
+def test_keygen_writes_private_key_and_prints_matching_public_key(tmp_path, capsys):
+    import base64
+    import os
+
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
+
+    out = tmp_path / "rh.env"
+    assert main(["keygen", "--out", str(out)]) == 0
+    assert oct(os.stat(out).st_mode & 0o777) == "0o600"
+
+    private_b64 = out.read_text().strip().split("=", 1)[1]
+    printed = capsys.readouterr().out
+    public_b64 = printed.split("\n\n")[1].strip()
+    key = Ed25519PrivateKey.from_private_bytes(base64.b64decode(private_b64))
+    assert base64.b64encode(key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)).decode() == public_b64
+    assert private_b64 not in printed
+
+    with pytest.raises(SystemExit, match="already exists"):
+        main(["keygen", "--out", str(out)])
+
+
 def test_approver_declines_without_terminal(monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     order = SizedOrder("BTC-USD", "buy", 0.01, 100.0, 0.0)
