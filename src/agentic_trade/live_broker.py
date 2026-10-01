@@ -1,7 +1,8 @@
 """Live broker: places real market orders on Robinhood through the Crypto Trading API.
 
 Every order runs the same risk checks as the paper broker. It then has to pass
-an approval callback, which by default asks a human at the terminal, before it is sent.
+an approval callback before it is sent. The CLI's callback approves automatically, or asks at
+the terminal with `--confirm`.
 Cash and holdings always come from Robinhood. The local Portfolio only keeps the fill log.
 """
 

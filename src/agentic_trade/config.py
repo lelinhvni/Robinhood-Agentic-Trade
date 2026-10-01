@@ -40,6 +40,9 @@ class Settings:
     live_max_order_notional: float = 5.0
     """Per-order cap in live mode. It replaces risk.max_order_notional when trading real money."""
 
+    live_auto_approve: bool = True
+    """Place live orders without asking. `run --live --confirm` or AGENTIC_TRADE_LIVE_AUTO_APPROVE=0 turns prompts on."""
+
     expected_account: str | None = None
     """Robinhood crypto account number the API key must belong to; live mode refuses to trade otherwise."""
 
@@ -59,4 +62,7 @@ class Settings:
             kwargs["state_path"] = Path(state)
         if max_live:
             kwargs["live_max_order_notional"] = float(max_live)
+        auto = os.environ.get("AGENTIC_TRADE_LIVE_AUTO_APPROVE")
+        if auto is not None and auto.strip():
+            kwargs["live_auto_approve"] = auto.strip().lower() not in ("0", "false", "no", "off")
         return cls(**kwargs)

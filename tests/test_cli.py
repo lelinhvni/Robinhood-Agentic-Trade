@@ -4,9 +4,17 @@ from agentic_trade.broker import SizedOrder
 from agentic_trade.cli import _approver, main
 
 
-def test_yes_requires_live():
+def test_confirm_requires_live():
     with pytest.raises(SystemExit):
-        main(["run", "--yes"])
+        main(["run", "--confirm"])
+
+
+def test_live_auto_approve_defaults_on_and_env_can_disable(monkeypatch):
+    from agentic_trade.config import Settings
+    monkeypatch.delenv("AGENTIC_TRADE_LIVE_AUTO_APPROVE", raising=False)
+    assert Settings.from_env().live_auto_approve is True
+    monkeypatch.setenv("AGENTIC_TRADE_LIVE_AUTO_APPROVE", "0")
+    assert Settings.from_env().live_auto_approve is False
 
 
 def test_live_without_credentials_exits(monkeypatch):

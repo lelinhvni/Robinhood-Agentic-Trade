@@ -37,10 +37,10 @@ def _approver(auto_approve: bool):
                    f"(~${order.quantity * order.price:,.2f} at {order.price:,.2f})\n  reason: {reason}")
         print(summary, file=sys.stderr)
         if auto_approve:
-            print("  auto-approved (--yes)", file=sys.stderr)
+            print("  auto-approved", file=sys.stderr)
             return True
         if not sys.stdin.isatty():
-            print("  declined: no terminal to ask for approval (use --yes to auto-approve)", file=sys.stderr)
+            print("  declined: --confirm needs a terminal to ask for approval", file=sys.stderr)
             return False
         return input("  Place this order? [y/N] ").strip().lower() in ("y", "yes")
     return approve
@@ -61,12 +61,13 @@ def cmd_run(args, settings: Settings) -> int:
     client = anthropic.Anthropic()
 
     if args.live:
-        broker = _live_broker(settings, args.yes)
+        auto_approve = settings.live_auto_approve and not args.confirm
+        broker = _live_broker(settings, auto_approve)
         feed = broker.client
         state_path = settings.live_state_path
         print(f"LIVE TRADING on Robinhood crypto account {mask(broker.account['account_number'])} | "
               f"buying power ${broker.portfolio.cash:,.2f} | max ${broker.risk.max_order_notional:,.2f}/order | "
-              f"{'auto-approve' if args.yes else 'manual approval'}", file=sys.stderr)
+              f"{'auto-approve' if auto_approve else 'manual approval'}", file=sys.stderr)
     else:
         feed = market_data.from_env(dict(os.environ), seed=args.seed)
         state_path = settings.state_path
@@ -129,7 +130,7 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--iterations", type=int, default=1, help="Number of runs; 0 loops forever.")
     run.add_argument("--interval", type=float, default=300, help="Seconds between runs.")
     run.add_argument("--live", action="store_true", help="Trade real money on Robinhood (default: paper).")
-    run.add_argument("--yes", action="store_true", help="With --live, place orders without asking for approval.")
+    run.add_argument("--confirm", action="store_true", help="With --live, ask y/N before each order.")
     run.set_defaults(func=cmd_run)
     status = sub.add_parser("status", help="Show the portfolio.")
     status.add_argument("--live", action="store_true", help="Show the live Robinhood account.")
@@ -137,8 +138,8 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("reset", help="Delete the saved paper portfolio and price history.").set_defaults(func=cmd_reset)
 
     args = parser.parse_args(argv)
-    if getattr(args, "yes", False) and not args.live:
-        parser.error("--yes only applies with --live")
+    if getattr(args, "confirm", False) and not args.live:
+        parser.error("--confirm only applies with --live")
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(asctime)s %(levelname)s %(message)s")
     return args.func(args, Settings.from_env())
