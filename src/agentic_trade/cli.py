@@ -17,7 +17,7 @@ from .agent import TradingAgent
 from .broker import PaperBroker, Portfolio, SizedOrder
 from .config import Settings
 from .live_broker import LiveBroker, mask
-from .robinhood import RobinhoodCryptoClient
+from .robinhood import RobinhoodAPIError, RobinhoodCryptoClient
 
 
 def _history_path(state_path):
@@ -175,7 +175,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--confirm only applies with --live")
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING,
                         format="%(asctime)s %(levelname)s %(message)s")
-    return args.func(args, Settings.from_env())
+    try:
+        return args.func(args, Settings.from_env())
+    except (RuntimeError, RobinhoodAPIError) as e:
+        sys.exit(f"Error: {e}")
 
 
 if __name__ == "__main__":
